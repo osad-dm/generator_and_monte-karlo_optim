@@ -8,398 +8,456 @@
 using namespace std;
 
 #define func function<complex<double>()>
-#define usint unsigned short int
+#define M_PI 3.14159265
 
-usint cp;//Число светоделительных пластинок
-usint wp;//Число волновых пластинок
-usint p;//Число портов ввода-вывода
-usint graph_size;//Размер графа
-
-//Память для рекурсии edges
-struct edges_status
+//Перечисление типов однокубитовых операторов
+enum operators_types
 {
-	usint p;
-	usint c;
-	usint w;
-	vector<usint> arr;
-	vector<bool> busy;
+	beamsplitter,
+	directCoupler,
+	waveplate
 };
 
-//Отдельный граф - содержит флаги инициализированных рёбер
+//Хранит в себе комбинацию типов однокубитовых операторов
+struct operators_comb
+{
+	//q - число однокубитовых операторов
+	operators_comb(char q)
+	{
+		size = q;
+		op = new operators_types[size];
+	}
+	~operators_comb()
+	{
+		delete op;
+	}
+	operators_types* op;
+	char size;//Число однокубитовых операторов
+
+	bool operator== (operators_comb other)
+	{
+		bool equal = true;
+		for (char i = 0; i < size; i++)
+			if (op[i] != other.op[i])
+			{
+				equal = false; break;
+			}
+		return equal;
+	}
+};
+
+//Содержит всю информацию об отдельном графе
 struct graph
 {
-	graph(short int )
+	/*
+	p(orts) - число портов ввода-вывода
+	cp (coupPlates) - число светоделительных пластинок
+	dc (directionCoupler) - число направленных светоделителей
+	w(aveplates) - число волновых пластинок (фазовращателей)
+	*/
+	graph(char ports, char beamsplitters, char directCouplers, char waveplates)
+	{
+		p = ports;
+		bs = beamsplitters;
+		dc = directCouplers;
+		w = waveplates;
+		q = bs + dc + w;
+		size = p + 2 * (bs + dc + w);
+		edges = new char[size];
+		busy = new bool[size];
+		for (char i = 0; i < size; i++) busy[i] = false;
+		comb = new operators_comb(q);
+		var_size = bs + dc + 2 * w;
+		var = new double[var_size];
+	};
+	/*graph(graph other)
+	{
+		p = other.p;
+		bs = other.bs;
+		dc = other.dc;
+		w = other.w;
+		q = other.q;
+		size = other.size;
+		edges = new char[size];
+		for (char i = 0; i < size; i++) edges[i] = other.edges[i];
+		busy = new bool[size];
+		for (char i = 0; i < size; i++) busy[i] = other.busy[i];
+		comb = new operators_comb(q);
+		for (char i = 0; i < comb->size; i++) comb->op[i] = other.comb->op[i];
+		var_size = bs + dc + 2 * w;
+		var = new double[var_size];
+		for (char i = 0; i < var_size; i++) var[i] = other.var[i];
+	};*/
+	~graph()
+	{
+		delete edges;
+		delete busy;
+		delete comb;
+		delete var;
+	};
+
+	//Направленный граф
+	char *edges;
+	//Хранит в себе инфу о том, какие из рёбер были инициализированы
+	bool *busy;
+	//Хранит в себе комбинацию типов однокубитовых операторов
+	operators_comb *comb;
+	
+	char size;//Размер направленного графа - чтобы каждый раз не складывать отдельные слагаемые
+	char p;//p(orts) - число портов ввода-вывода
+	char q;//Число однокубитовых операторов
+	char bs;//(beamsplitters) - число светоделительных пластинок
+	char dc;//(direction couplers) - число направленных светоделителей
+	char w;//(waveplates) - число волновых пластинок (фазовращателей)
+	char var_size;//Число переменных
+
+	complex<double> *var;//Внутренние параметры графа
+	
+	//Возвращает номер переменной из массива var[], соответствующей однокубитовому оператору comb->op[oper_num]
+	//Если для данного однокубитового оператора нужно несколько переменных - то будет возвращёна ссылка на первого из них
+	complex<double>& var_num(char oper_num)
+	{
+		//Вычислим номер необходимого оператора из массива var[]
+		char var_num = 0;
+		for (char i = 0; i < oper_num; i++) 
+			switch (comb->op[i])
+			{
+			case beamsplitter:
+			case directCoupler: var_num++; break;
+			case waveplate: var_num += 2; break;
+			};
+		return var[var_num];
+	};
+	
+	//Определяет какому типу однокубитового оператора принадлежит переменная с номером var_num
+	operators_types oper_type(char var_num)
+	{
+		char oper_num = 0;
+		while (var_num > 0)
+			switch (comb->op[oper_num])
+			{
+			case beamsplitter:
+			case directCoupler:
+				var_num--; break;
+			case waveplate:
+				var_num -= 2;
+			}
+		return comb->op[oper_num];
+	};
 };
 
 //Рекурсивно находит все возможные пути
-//TODO: Избавиться от использования контейнеров
-void paths(int start, edges_status stat, vector<vector<set<vector<int>>>> &matrix, vector<int> way)
+void paths(char start, graph g, set<vector<char>> **matrix, vector<char> way)
 {
 	way.push_back(start);
-	way.push_back(stat.arr[start]);
-	if (stat.arr[start] < (stat.c + stat.w) * 2) //Если наш порт смотрит в однокубитовый оператор
+	way.push_back(g.edges[start]);
+	if (g.edges[start] < g.q * 2) //Если наш порт смотрит в однокубитовый оператор
 	{
-		paths((stat.arr[start] / 2) * 2, stat, matrix, way);
-		paths((stat.arr[start] / 2) * 2 + 1, stat, matrix, way);
+		paths((g.edges[start] / 2) * 2, g, matrix, way);
+		paths((g.edges[start] / 2) * 2 + 1, g, matrix, way);
 	}
 	else//Если наш порт смотрит в порт вывода
 	{
 		//Запишем получившуюся траекторию в массив
-		matrix[way.front() - (stat.c + stat.w) * 2][way.back() - (stat.c + stat.w) * 2].insert(way);
+		matrix[way.front() - g.q * 2][way.back() - g.q * 2].insert(way);
 	}
 };
 
-//Структура для хранения узла синтаксического дерева
-struct vertice
+//Возвращает функцию, определяя тип оператора по номеру oper_num из графа g, а номера портов ввода-вывода по in и out
+func get_func(graph &g, char oper_num, char in, char out)
 {
-	vertice *left, *right;
-	func f;
-	vertice() { left = right = nullptr; }
-	~vertice() { delete left; delete right; };
+	switch (g.comb->op[oper_num])
+	{
+	case beamsplitter:
+	{
+		complex<double> &tmp = g.var_num(oper_num);
+		if (in == 0 && out == 0) return [&tmp](void)->complex<double> {return sqrt(tmp);}; else
+		if (in == 0 && out == 1) return [&tmp](void)->complex<double> {return sqrt((complex<double>)1 - tmp);}; else
+		if (in == 1 && out == 0) return [&tmp](void)->complex<double> {return sqrt((complex<double>)1 - tmp);}; else
+		if (in == 1 && out == 1) return [&tmp](void)->complex<double> {return -sqrt(tmp);};
+		break;
+	}
+	case directCoupler:
+	{
+		complex<double> &tmp = g.var_num(oper_num);
+
+		if (in == 0 && out == 0) return [&tmp](void)->complex<double> {return sqrt(tmp);}; else
+		if (in == 0 && out == 1) return [&tmp](void)->complex<double> {return sqrt((complex<double>)1 - tmp)*exp(complex<double>::complex(0, M_PI / 2));}; else
+		if (in == 1 && out == 0) return [&tmp](void)->complex<double> {return sqrt((complex<double>)1 - tmp)*exp(complex<double>::complex(0, M_PI / 2));}; else
+		if (in == 1 && out == 1) return [&tmp](void)->complex<double> {return sqrt(tmp);};
+		break;
+	}
+	}
+}
+
+//Возвращает матрицу амплитуд по матрице траекторий. Граф g нужен для определения типа однокубитового элемента и числа тех или иных элементов
+func** make_matrix_amplitude(set<vector<char>> **matrix, graph &g)
+{
+	func **ans = new func*[g.p];
+	for (char i = 0; i < g.p; i++) ans[i] = new func[g.p];
+
+	for (char i = 0; i < g.p; i++)
+		for (char j = 0; j < g.p; j++)
+		{
+			ans[i][j] = nullptr;
+			if (!matrix[i][j].empty())
+			{
+				vector<char> one_path = *(matrix[i][j].begin());//Отдельный путь
+				func summand = nullptr;//Отдельное слагаемое
+				for (char k = 1; k < (char)one_path.size() - 1; k += 2)
+				{
+					char oper_num = one_path[k] / 2;//Порядковый номер однокубитового оператора из g.comb
+					char in = one_path[k] % 2;//Номер порта ввода
+					char out = one_path[k + 1] % 2;//Номер порта вывода
+					if (summand == nullptr)
+					{
+						//В этой точке мы знаем номер однокубитового порта и его порты ввода-вывода
+						summand = get_func(g, oper_num, in, out);
+					} else
+					{
+						func old_func = summand;
+						summand = [old_func, &g, oper_num, in, out]()->complex<double> {return old_func() * get_func(g, oper_num, in, out)();};
+					}
+				}//end for(k)
+				
+				//В данной точке мы сформировали функцию, которая представляет собой отдельное слагаемое
+				if (ans[i][j] == nullptr) ans[i][j] = summand;
+				else
+				{
+					func old_func = ans[i][j];
+					ans[i][j] = [old_func, summand]()->complex<double> {return old_func() + summand();};
+				}
+			}
+		}
+	return ans;
 };
 
-//Структура, которая хранит направленный граф и матрицу амплитуд из функций
-struct graph_and_Mampl
+//Данная рекурсия может получить на входе пустой граф, или его заготовку
+//Возвращает наилучший граф из всех возможных для данной заготовки
+//me - узел, с которого мы сейчас стартуем
+pair<graph,double> choose_best_graph(char me, graph g)
 {
-	short int *graph = nullptr;
-	func **MAmpl = nullptr;
-	//p - число портов ввода-вывода
-	//c - число светоделительных пластинок
-	//w - число волновых пластинок
-	graph_and_Mampl(void)
+	double best = 0;//Вероятность работы наилучшей схемы с оптимальными параметрами
+	graph g_best(g);//Граф, вероятность работы которого наивысшая
+
+	//Необходимо достроить полученный направленный граф
+	if (me < g.q * 2)//Если мы сейчас стартуем из однокубитового оператора
 	{
-		graph = new short int[graph_size];
-		MAmpl = new func*[p];
-		for (usint i = 0; i < p; i++) MAmpl[i] = new func[p];
-	};
-	~graph_and_Mampl()
-	{
-		for (usint i = 0; i < p; i++) delete MAmpl[i];
-		delete MAmpl;
-		delete graph;
+		//Пройдёмся по всем однокубитовым элементам
+		for (int i = (me / 2) * 2 + 2; i < g.size; i++)
+		{
+			if (!g.busy[i])
+			{
+				g.busy[i] = true;
+				g.edges[me] = i;
+				choose_best_graph(me + 1, g);
+				g.busy[i] = false;
+			}
+		}
 	}
-};
+	else//В этой точке мы стартуем из порта ввода
+		if (me < g.size)
+			//Порт ввода может смотреть в любой узел графа
+			for (int i = 0; i < g.size; i++)
+			{
+				if (!g.busy[i])
+				{
+					g.busy[i] = true;
+					g.edges[me] = i;
+					choose_best_graph(me + 1, g);
+					g.busy[i] = false;
+				}
+			}
+		else
+		{
+			//В этой ветке мы уже прошлись по всем исходящим вершинам графа.
+			//Теперь в g полностью запоненный массив, представляющий собой направленный граф. Но он ещё абстрактен от светоделителей и фазовращателей
+
+			//Накостыляем условия, которые скажут нам есть ли связь между нужным портом ввода и нужным(и) выводами,
+			//и по этим условиям отсеять неподходящие графы
+			{
+				set<vector<char>> **matrix = new set<vector<char>>*[g.p];//Матрица траекторий
+				for (char i = 0; i < g.p; i++) matrix[i] = new set<vector<char>>[g.p];
+
+				//Заполним матрицу траекторий
+				//Стартанём алгоритм поиска траекторий из всех портов ввода
+				//Результат будет в matrix
+				for (int i = g.q * 2; i < g.size; i++) paths(i, g, matrix, vector<char>::vector());
+
+				//Теперь у нас есть матрица траекторий для сгенерированного графа. Теперь определим удовлетворяет ли этот граф условию.
+				if (matrix[0][2].empty() && matrix[0][3].empty() && //Первая версия
+					!matrix[1][2].empty() && !matrix[1][3].empty() &&
+					!matrix[0][0].empty() && matrix[0][1].empty() && //Начало второй версии
+					matrix[1][0].empty() && !matrix[1][1].empty() &&
+					matrix[2][0].empty() && !matrix[2][1].empty() && //Начало четвёртой версии
+					!matrix[2][2].empty() && !matrix[2][3].empty() &&
+					matrix[3][0].empty() && !matrix[3][1].empty() &&
+					!matrix[3][2].empty() && !matrix[3][3].empty())
+				{
+					//В этой точке у нас есть граф с матрицей траекторий, который удовлетворяет всем условиям
+					//Теперь переберём все комбинации типов однокубитовых операторов
+
+					set<operators_comb> memory_oper_comb;//Все комбинации одонкубитовых операторов
+					for (char i = 0; i < g.bs; i++)				g.comb->op[i] = beamsplitter;
+					for (char i = g.bs; i < g.bs + g.dc; i++)	g.comb->op[i] = directCoupler;
+					for (char i = g.dc; i < g.q; i++)			g.comb->op[i] = waveplate;
+
+					do
+					{
+						if (memory_oper_comb.find(*g.comb) == memory_oper_comb.end())
+						{
+							//В данной точке у нас уникальный заполненный граф g, с матрицей траекторий matrix, с уникальной комбинацией однокубитовых операторов
+							memory_oper_comb.insert(*g.comb);//Сохраним эту комбинацию, чтобы в будущем не повторяться
+
+							//Теперь получим матрицу амплитуд из функций
+							func **MAmpl = make_matrix_amplitude(matrix, g);
+
+							//Теперь из этой матрицы амплитуд необходимо получить логическую матрицу, которая размером 4x4
+							func L[4][4];
+							{
+								L[0][0] = [&MAmpl]() {return MAmpl[1][1]() * MAmpl[3][3]() + MAmpl[1][3]() * MAmpl[3][1]();};
+								L[0][1] = [&MAmpl]() {return MAmpl[1][1]() * MAmpl[2][3]() + MAmpl[1][3]() * MAmpl[2][1]();};
+								L[0][2] = [&MAmpl]() {return MAmpl[0][1]() * MAmpl[3][3]() + MAmpl[0][3]() * MAmpl[3][1]();};
+								L[0][3] = [&MAmpl]() {return MAmpl[0][1]() * MAmpl[2][3]() + MAmpl[0][3]() * MAmpl[2][1]();};
+
+								L[1][0] = [&MAmpl]() {return MAmpl[1][1]() * MAmpl[3][2]() + MAmpl[1][2]() * MAmpl[3][1]();};
+								L[1][1] = [&MAmpl]() {return MAmpl[1][1]() * MAmpl[2][2]() + MAmpl[1][3]() * MAmpl[2][1]();};
+								L[1][2] = [&MAmpl]() {return MAmpl[0][1]() * MAmpl[3][2]() + MAmpl[0][2]() * MAmpl[3][1]();};
+								L[1][3] = [&MAmpl]() {return MAmpl[0][1]() * MAmpl[2][2]() + MAmpl[0][2]() * MAmpl[2][1]();};
+
+								L[2][0] = [&MAmpl]() {return MAmpl[1][0]() * MAmpl[3][3]() + MAmpl[1][3]() * MAmpl[3][0]();};
+								L[2][1] = [&MAmpl]() {return MAmpl[1][0]() * MAmpl[2][3]() + MAmpl[1][3]() * MAmpl[2][0]();};
+								L[2][2] = [&MAmpl]() {return MAmpl[0][0]() * MAmpl[3][3]() + MAmpl[0][3]() * MAmpl[3][0]();};
+								L[2][3] = [&MAmpl]() {return MAmpl[0][0]() * MAmpl[2][3]() + MAmpl[0][3]() * MAmpl[2][0]();};
+
+								L[3][0] = [&MAmpl]() {return MAmpl[1][0]() * MAmpl[3][2]() + MAmpl[1][2]() * MAmpl[3][0]();};
+								L[3][1] = [&MAmpl]() {return MAmpl[1][0]() * MAmpl[2][2]() + MAmpl[1][2]() * MAmpl[2][0]();};
+								L[3][2] = [&MAmpl]() {return MAmpl[0][0]() * MAmpl[3][2]() + MAmpl[1][2]() * MAmpl[3][0]();};
+								L[3][3] = [&MAmpl]() {return MAmpl[0][0]() * MAmpl[2][2]() + MAmpl[0][2]() * MAmpl[2][0]();};
+							}
+
+							//Теперь необходимо составить список условий:
+							vector<func> restrictions;//Ограничения равенства " = 0 " - все они должны быть равны нулю
+							{
+								//унитарность
+								{
+									//Перебор всех пар столбцов.
+									for (int k1 = 0; k1 < 5; k1++)//Номер первого столбца пары
+										for (int k2 = k1 + 1; k2 < 6; k2++)//Номер второго столбца пары
+										{
+											restrictions.push_back(
+												[&MAmpl, k1, k2]()->complex<double> {
+												complex<double> val;
+												for (int i = 0; i < 6; i++)
+													val += MAmpl[i][k1]() * MAmpl[i][k2]();
+												return val;
+											});//end vector::push_back()
+										}
+								}//конец униатрность
+
+								 //нулевые элементы в логической матрице
+								{
+									restrictions.push_back(L[0][0]);
+									restrictions.push_back(L[0][2]);
+									restrictions.push_back(L[0][3]);
+
+									restrictions.push_back(L[1][1]);
+									restrictions.push_back(L[1][2]);
+									restrictions.push_back(L[1][3]);
+
+									restrictions.push_back(L[2][0]);
+									restrictions.push_back(L[2][1]);
+									restrictions.push_back(L[2][3]);
+
+									restrictions.push_back(L[3][0]);
+									restrictions.push_back(L[3][1]);
+									restrictions.push_back(L[3][2]);
+								}//конец нулевые элементы логической матрицы
+
+								 //Равенство действующих элементов логической матрицы
+								{
+									restrictions.push_back([&L]()->complex<double> {return L[0][1]() - L[1][0]();});
+									restrictions.push_back([&L]()->complex<double> {return L[1][0]() - L[2][2]();});
+									restrictions.push_back([&L]()->complex<double> {return L[2][2]() - L[3][3]();});
+								}//конец равенство действующих элементов между собой
+							}
+
+							//Теперь реализация метода Монте-Карло - необходимо бросить N случайных точек в пространстве g.var[]
+							//И если они с точностью eps удовлетворяют условиям равенства
+							//Реализация метода Монте-Карло - кидаем случайным образом точки и посмотрим что нам подойдёт
+							{
+								double eps = 1e-1;//Точность для условий равенства
+								bool nonzero = false;//Флаг того, что точка не удовлетворяет одному из условий
+								srand(time(0));
+
+								unsigned int total = 0;//Общее число сгенерированных точек
+								unsigned int satisfy_restrictions = 0;//Число точек, удовлетворяющих всем условиям
+
+								
+								for (char i = 0; i < g.var_size; i++) g.var[i] = 0;
+
+								//Начало цикла перебора случайных точек
+								do {
+									//Сгенерируем случайную точку в области допустимых значений
+									for (char i = 0; i < g.var_size; i++)
+										switch (g.oper_type(i))
+										{
+										case beamsplitter:
+										case directCoupler:
+											g.var[i] = (double)rand() / RAND_MAX;
+										case waveplate:
+											g.var[i] = (double)rand() / RAND_MAX * 2 * M_PI;
+										}
+
+									total++;
+
+									//Проверка на условия равенства
+									for (size_t i = 0; i < restrictions.size(); i++)
+										if (abs(restrictions[i]()) > eps)
+										{
+											nonzero = true;
+											break;
+										};
+
+									if (nonzero)//Если хоть одно условие равенства не выполнилось
+									{
+										nonzero = false;
+										continue;//Если данная точка не удовлетворяет одному из условий равенства, то пробуем следующую
+									}
+
+									//В данной точке у нас есть точка, удовлетворяющая всем условиям равенства
+									satisfy_restrictions++;
+
+									//Теперь вычислим то, с какой эффективностью работает схема с получившейся комбинацией внутренних параметров
+									double efficiency = abs(L[3][3]());
+									if (best < efficiency)
+									{
+										best = efficiency;
+										g_best = g;
+									}
+								} while (satisfy_restrictions < 5);//конец цикл перебора точек по числу сгенерированных точек
+
+								for (char i = 0; i < g.p; i++) delete MAmpl;
+								delete MAmpl;
+							}//Конец реализации метода Монте-Карло
+						}
+					} while (next_permutation(g.comb->op, g.comb->op + g.q));
+
+					//В данной точке у нас есть граф g_best с оптимальными внутренними параметрами, при который он работает с вероятностью best
+					//Необходимо выгрузить всю эту инфу во внешний мир
+				}//Конец обработки графа, удовлетворяющего матрице траекторий
+
+				for (char i = 0; i < g.p; i++) delete matrix[i];
+				delete matrix;
+			}
+		}//Конец обработки сгенерированного направленного графа
+
+		return pair<graph, double>::pair(g_best, best);
+}
 
 int main(void)
 {
 	
-	unsigned int graph[16] = { 10, 15, 4, 6, 8, 11, 9, 14, 12, 13, 0, 5, 2, 3, 7, 1 };//Направленный граф, описывающий схему
-
-	//Ниже код, который находит глобальный оптимум отдельного направленного графа
-	{
-		vector <vector<set<vector<int>>>> matrix;//Матрица траекторий - хранит в себе номера узлов графа, через которые проходит фотон
-
-		//Этот кусок кода проводит инициализацию и формирует матрицу траекторий
-		{
-			edges_status stat;
-			int p = stat.p = 6;
-			int c = stat.c = 5;
-			int w = stat.w = 0;
-
-			for (int i = 0; i < 16; i++) stat.arr[i] = graph[i];
-			stat.busy.resize((c + w) * 2 + p, false);
-
-			matrix.resize(stat.p);
-			for (int i = 0; i < stat.p; i++) matrix[i].resize(stat.p);
-
-			for (int i = (stat.c + stat.w) * 2; i < (stat.c + stat.w) * 2 + stat.p; i++)
-			{
-				vector<int> way;
-				paths(i, stat, matrix, way);
-			}
-		}
-
-		double eta[5] = { 1. / 3, 1. / 2, 1. / 3, 1. / 3, 1. / 2 };
-		func couplers[5][2][2];
-
-		for (int num = 0; num < 5; num++)
-		{
-			couplers[num][0][0] = [&eta, num]()->complex<double> {return sqrt(eta[num]);};
-			couplers[num][0][1] = [&eta, num]()->complex<double> {return sqrt(1 - eta[num]);};
-			couplers[num][1][0] = [&eta, num]()->complex<double> {return sqrt(1 - eta[num]);};
-			couplers[num][1][1] = [&eta, num]()->complex<double> {return -sqrt(eta[num]);};
-		}
-
-		vertice *M[6][6];
-		{
-			for (int i = 0; i < 6; i++)
-				for (int j = 0; j < 6; j++)
-					M[i][j] = nullptr;
-		}
-
-		//Основной алгоритм
-		{
-			for (int i = 0; i < 6; i++)
-				for (int j = 0; j < 6; j++)
-					do {//Этот цикл перебирает все пути в ячейке матрицы matrix[i][j]
-						//Вход в отдельный путь
-						if (!matrix[i][j].empty())
-						{
-							vertice *path = nullptr;//Отдельный путь - должно быть перемножение всех элементов, ч/з которые проходит фотон
-							vector<int> tmp = *matrix[i][j].begin();//Вытаскиваем отдельный путь
-							for (int k = 1; k < (int)tmp.size() - 1; k += 2)//Номер однокубитового оператора в пути tmp
-							{
-								pair<int, int> coup = { tmp[k], tmp[k + 1] };//Отдельный однокубитовый оператор
-								if (path == nullptr)//Если это первый однокубитовый оператор
-								{//,то создаём новый узел дерева
-									path = new vertice;
-									path->f = couplers[coup.first / 2][coup.first % 2][coup.second % 2];//Этот узел впоследствии уйдёт в самый конец синтаксического дерева
-								}
-								else
-								{//Иначе:
-									vertice *newcenter = new vertice;
-									newcenter->left = path;//убираем старое дерево влево
-														   //а справа ставим новый однокубитовый оператор
-									newcenter->right = new vertice;
-									newcenter->right->f = couplers[coup.first / 2][coup.first % 2][coup.second % 2];
-									//И задаём центральную функцию
-									func fl = newcenter->left->f, fr = newcenter->right->f;
-									newcenter->f = [fl, fr]()->complex<double> { return fl() * fr(); };
-
-									path = newcenter;
-								}
-							}
-							matrix[i][j].erase(matrix[i][j].begin());//Удаляем путь, который мы только что обработали
-
-							if (M[i][j] == nullptr)//Если это первый из путей в данной ячейке
-							{
-								M[i][j] = path;
-							}
-							else
-							{
-								//Если это не первый из путей, то новый путь нужно сложить с тем, который уже сохранён в  M[i][j]
-								vertice *newM = new vertice;
-
-								newM->left = M[i][j];
-								newM->right = path;
-								func fl = newM->left->f;
-								func fr = newM->right->f;
-								newM->f = [fl, fr]()->complex<double> { return fl() + fr(); };
-
-								M[i][j] = newM;
-							}
-						}
-						else//Когда элемент матрицы matrix[i][j] стала/была пустой
-						{
-							if (M[i][j] == nullptr)
-							{
-								M[i][j] = new vertice;
-								M[i][j]->f = []() {return 0;};
-							}
-							break;
-						}
-					} while (true);//Конец перебора всех путей одной ячейки
-		}
-
-		/*
-		В этой точке мы прошлись по всем ячейкам матрицы траекторий matrix[i][j]
-		и заменили эти траектории на значения однокубитовых элементов. При изменении переменных
-		будут меняться значения, возвращаемые функциями из матрицы M
-		*/
-
-		//Для теста выведем на экран содержимое матрицы амплитуд M
-		if (true)
-		{
-			cout << endl;
-			for (int i = 0; i < 6; i++)
-			{
-				cout << setprecision(3) << M[i][0]->f().real();
-				for (int j = 1; j < 6; j++)
-					cout << '\t' << setprecision(3) << M[i][j]->f().real();
-				cout << endl;
-			}
-		}
-
-		//Сформируем логическую матрицу
-		func L[4][4];//Логическая матрица
-		func A[6][6];//Матрица амплитуд - есть матрица M, из которой взяты только функции. Ввёл для удобства, чтобы не писать каждый раз M[i][j]->f
-		{
-			for (int i = 0; i < 6; i++)
-				for (int j = 0; j < 6; j++)
-					A[i][j] = M[i][j]->f;
-
-			L[0][0] = [&A]() {return A[1][1]() * A[3][3]() + A[1][3]() * A[3][1]();};
-			L[0][1] = [&A]() {return A[1][1]() * A[2][3]() + A[1][3]() * A[2][1]();};
-			L[0][2] = [&A]() {return A[0][1]() * A[3][3]() + A[0][3]() * A[3][1]();};
-			L[0][3] = [&A]() {return A[0][1]() * A[2][3]() + A[0][3]() * A[2][1]();};
-
-			L[1][0] = [&A]() {return A[1][1]() * A[3][2]() + A[1][2]() * A[3][1]();};
-			L[1][1] = [&A]() {return A[1][1]() * A[2][2]() + A[1][3]() * A[2][1]();};
-			L[1][2] = [&A]() {return A[0][1]() * A[3][2]() + A[0][2]() * A[3][1]();};
-			L[1][3] = [&A]() {return A[0][1]() * A[2][2]() + A[0][2]() * A[2][1]();};
-
-			L[2][0] = [&A]() {return A[1][0]() * A[3][3]() + A[1][3]() * A[3][0]();};
-			L[2][1] = [&A]() {return A[1][0]() * A[2][3]() + A[1][3]() * A[2][0]();};
-			L[2][2] = [&A]() {return A[0][0]() * A[3][3]() + A[0][3]() * A[3][0]();};
-			L[2][3] = [&A]() {return A[0][0]() * A[2][3]() + A[0][3]() * A[2][0]();};
-
-			L[3][0] = [&A]() {return A[1][0]() * A[3][2]() + A[1][2]() * A[3][0]();};
-			L[3][1] = [&A]() {return A[1][0]() * A[2][2]() + A[1][2]() * A[2][0]();};
-			L[3][2] = [&A]() {return A[0][0]() * A[3][2]() + A[1][2]() * A[3][0]();};
-			L[3][3] = [&A]() {return A[0][0]() * A[2][2]() + A[0][2]() * A[2][0]();};
-		}
-
-		//Вывод логической матрицы L на экран
-		if (true)
-		{
-			cout << endl;
-			for (int i = 0; i < 4; i++)
-			{
-				cout.setf(ios::fixed);
-				cout << setprecision(3) << L[i][0]().real();
-				for (int j = 1; j < 4; j++)
-					cout << '\t' << setprecision(3) << L[i][j]().real();
-				cout << endl;
-			}
-		}
-
-		//Теперь необходимо составить список условий:
-		vector<func> restrictions;//Ограничения равенства " = 0 " - все они должны быть равны нулю
-		{
-			//унитарность
-			{
-				//Перебор всех пар столбцов.
-				for (int k1 = 0; k1 < 5; k1++)//Номер первого столбца пары
-					for (int k2 = k1 + 1; k2 < 6; k2++)//Номер второго столбца пары
-					{
-						restrictions.push_back(
-							[&A, k1, k2]()->complex<double> {
-							complex<double> val;
-							for (int i = 0; i < 6; i++)
-								val += A[i][k1]() * A[i][k2]();
-							return val;
-						});//end vector::push_back()
-					}
-			}//конец униатрность
-
-			 //нулевые элементы в логической матрице
-			{
-				restrictions.push_back(L[0][0]);
-				restrictions.push_back(L[0][2]);
-				restrictions.push_back(L[0][3]);
-
-				restrictions.push_back(L[1][1]);
-				restrictions.push_back(L[1][2]);
-				restrictions.push_back(L[1][3]);
-
-				restrictions.push_back(L[2][0]);
-				restrictions.push_back(L[2][1]);
-				restrictions.push_back(L[2][3]);
-
-				restrictions.push_back(L[3][0]);
-				restrictions.push_back(L[3][1]);
-				restrictions.push_back(L[3][2]);
-			}//конец нулевые элементы логической матрицы
-
-			 //Равенство действующих элементов логической матрицы
-			{
-				restrictions.push_back([&L]()->complex<double> {return L[0][1]() - L[1][0]();});
-				restrictions.push_back([&L]()->complex<double> {return L[1][0]() - L[2][2]();});
-				restrictions.push_back([&L]()->complex<double> {return L[2][2]() - L[3][3]();});
-			}//конец равенство действующих элементов между собой
-		}
-
-		//Проверим, удовлетворяют ли оптимальные значения светоделителей всем этим нашим условиям
-		if (true)
-		{
-			bool satisfy = true;//Флаг того, что выполняются все условия равенства
-			double eps = 1e-2;
-			for (size_t i = 0; i < restrictions.size(); i++)
-				if (abs(restrictions[i]()) > eps) {
-					satisfy = false; break;
-				}
-			if (satisfy) cout << "Ideal parameters satisfying all restrictions" << endl;
-			else cout << "Ideal parameters NOT satisfying all restrictions" << endl;
-
-			//Выведем значнеия всех условий равенства нулю
-			if (!satisfy)
-			{
-				for (size_t i = 0; i < restrictions.size(); i++)
-					cout << i << ": " << restrictions[i]() << endl;
-			}
-		}
-
-		//Реализация метода Монте-Карло - кидаем случайным образом точки и посмотрим что нам подойдёт
-		if (true)
-		{
-			cout << endl;
-			double eps = 1e-1;//Точность для условий равенства
-			bool nonzero = false;//Флаг того, что точка не удовлетворяет одному из условий
-			srand(time(0));
-
-			unsigned int total = 0;//Общее число сгенерированных точек
-			unsigned int satisfy_restrictions = 0;//Число точек, удовлетворяющих всем условиям
-			clock_t start = clock();//Для измерения времени, необходимого для нахождения глобального максимума
-
-			vector<unsigned int> statistic_total, statistic_satis;
-			vector<clock_t> statistic_clock;
-
-			do {//цикл перебора случайных точек
-				//Сгенерируем случайную точку в области допустимых значений
-				for (int i = 0; i < 5; i++)
-					eta[i] = (double)rand() / RAND_MAX;
-				total++;
-
-				//if (total % 10000 == 0) cout << "Total = " << total << "; satisfy(%) = " << setprecision(2) << (double)satisfy_restrictions/total * 100 << endl;
-
-				for (size_t i = 0; i < restrictions.size(); i++)
-					if (abs(restrictions[i]()) > eps)
-					{
-						nonzero = true;
-						break;
-					};
-				if (nonzero)
-				{
-					nonzero = false;
-					continue;//Если данная точка не удовлетворяет одному из условий равенства, то пробуем следующую
-				}
-
-				//В данной точке у нас есть точка, удовлетворяющая всем условиям равенства
-				satisfy_restrictions++;
-
-				//Теперь посчитаем число точек, попавших в допустимый интервал целевой функции
-				if (abs(L[3][3]()) > 0.3)
-				{
-					statistic_total.push_back(total);
-					statistic_satis.push_back(satisfy_restrictions);
-					statistic_clock.push_back(clock() - start);
-					cout << statistic_total.size() <<
-						": Tot = " << total <<
-						";\tsatis_restr = " << satisfy_restrictions <<
-						";\ttime = " << setprecision(3) << (double)(statistic_clock.back() * 1000) / CLOCKS_PER_SEC << "ms" << endl;
-					total = satisfy_restrictions = 0;
-					start = clock();
-				}
-
-			} while (statistic_total.size() < 1000);//конец цикл перебора точек
-
-													//Выведем статистику в файл для отрисовки
-			if (true)
-			{
-				ofstream file("data_total", ios::trunc);
-				sort(statistic_total.begin(), statistic_total.end());
-				for (size_t i = 0; i < statistic_total.size(); i++)
-					file << statistic_total[i] << '\t' << (double)i / statistic_total.size() << endl;
-				file.close();
-
-				sort(statistic_satis.begin(), statistic_satis.end());
-				file.open("data_satis", ios::trunc);
-				for (size_t i = 0; i < statistic_satis.size(); i++)
-					file << statistic_satis[i] << '\t' << (double)i / statistic_satis.size() << endl;
-				file.close();
-
-				sort(statistic_clock.begin(), statistic_clock.end());
-				file.open("data_clock", ios::trunc);
-				for (size_t i = 0; i < statistic_clock.size(); i++)
-					file << (double)(statistic_clock[i] * 1000) / CLOCKS_PER_SEC << '\t' << (double)i / statistic_clock.size() << endl;
-				file.close();
-			}
-		}
-
-		for (int i = 0; i < 6; i++)
-			for (int j = 0; j < 6; j++)
-				delete M[i][j];
-	}
 
 	return 0;
 }
