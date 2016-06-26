@@ -16,8 +16,8 @@
 #include <math.h>
 #include <cmath>
 #include <functional>
-//#include <iostream>
-//#include <iomanip>
+#include <iostream>
+#include <iomanip>
 #include <time.h>
 #include <algorithm>
 #include <fstream>
