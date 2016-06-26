@@ -38,6 +38,7 @@ struct graph
 		edges.resize(size);
 		busy.resize(size, false);
 		comb.resize(q);
+		efficiency = 0;
 		//Инициализация comb
 		{
 			for (char i = 0; i < bs; i++)			comb[i] = beamsplitter;
@@ -49,7 +50,7 @@ struct graph
 
 	//Направленный граф
 	vector<char> edges;
-	//Хранит в себе инфу о том, какие из рёбер были инициализированы
+	//Хранит в себе инфу о том, в какие из вершин уже смотрит ребро
 	vector<bool> busy;
 	//Хранит в себе комбинацию типов однокубитовых операторов
 	vector<operators_types> comb;
@@ -60,6 +61,7 @@ struct graph
 	char bs;//(beamsplitters) - число светоделительных пластинок
 	char dc;//(direction couplers) - число направленных светоделителей
 	char w;//(waveplates) - число волновых пластинок (фазовращателей)
+	double efficiency;//Эффективность работы графа
 
 	vector<double> var;//Внутренние параметры графа
 	
@@ -160,6 +162,7 @@ func get_func(graph &g, char oper_num, char in, char out)
 			{return exp(complex<double>::complex(0, *phi))*pow(sin(*alpha), 2) + pow(cos(*alpha), 2);};
 		break;
 	}
+	default: return []()->complex<double> {return 0;};
 	}
 }
 
@@ -210,40 +213,99 @@ vector<vector<func>> make_matrix_amplitude(vector<vector<set<vector<char>>>> &ma
 	return ans;
 };
 
+//Реализация метода Монте-Карло
+//Возвращает максимальное значение целевой функции aim
+//g - направленный граф
+//L - логическая матрица из функций
+//restrictions - массив условий равенства
+//eps - точность удовлетворения условиям равенства
+//satisfy - число точек, которые должны удовлетворять всем условиям равенства - условие выхода из цикла
+double monte_karlo(graph &g, func aiming_function, vector<func> &restrictions, double eps, int satisfy)
+{
+	//Необходимо бросить N случайных точек в пространстве g.var[]
+	//И если они с точностью eps удовлетворяют условиям равенства
+	//Реализация метода Монте-Карло - кидаем случайным образом точки и посмотрим что нам подойдёт
+	
+	graph g_best(g);//Наилучший граф - в данной функции нам от него нужны только переменные и конечная эффективность
+	bool nonzero = false;//Флаг того, что точка не удовлетворяет одному из условий
+	srand((unsigned)time(0));
+
+	unsigned int satisfy_restrictions = 0;//Число точек, удовлетворяющих всем условиям
+
+	//Начало цикла перебора случайных точек
+	do {
+		//Сгенерируем случайную точку в области допустимых значений
+		for (char i = 0; i < g.var.size(); i++)
+			switch (g.oper_type(i))
+			{
+			case beamsplitter:
+			case directCoupler:
+				g.var[i] = (double)rand() / RAND_MAX; break;
+			case waveplate:
+				g.var[i] = (double)rand() / RAND_MAX * 2 * M_PI; break;
+			}
+
+		//Проверка на условия равенства
+		for (size_t i = 0; i < restrictions.size(); i++)
+			if (abs(restrictions[i]()) > eps)
+			{
+				nonzero = true;
+				break;
+			};
+
+		if (nonzero)//Если хоть одно условие равенства не выполнилось
+		{
+			nonzero = false;
+			continue;//Если данная точка не удовлетворяет одному из условий равенства, то пробуем следующую
+		}
+
+		//В данной точке у нас есть точка, удовлетворяющая всем условиям равенства
+		satisfy_restrictions++;
+
+		//Теперь вычислим то, с какой эффективностью работает схема с получившейся комбинацией внутренних параметров
+		double efficiency = abs(aiming_function());
+		if (g_best.efficiency < efficiency)
+		{
+			g_best = g;
+			g_best.efficiency = efficiency;
+		}
+	} while (satisfy_restrictions < satisfy);//конец цикл перебора точек по числу сгенерированных точек
+	//Конец реализации метода Монте-Карло
+
+	g = g_best;
+	return g_best.efficiency;
+}
+
 //Данная рекурсия может получить на входе пустой граф, или его заготовку
 //Возвращает наилучший граф из всех возможных для данной заготовки
 //me - узел, с которого мы сейчас стартуем
-graph choose_best_graph(char me, graph g)
+void choose_best_graph(char me, graph g, graph &g_best)
 {
-	double best = 0;//Вероятность работы наилучшей схемы с оптимальными параметрами
-	graph g_best = g;//Граф, вероятность работы которого наивысшая
-
-	//Необходимо достроить полученный направленный граф
+	//Необходимо достроить направленный граф g
 	if (me < g.q * 2)//Если мы сейчас стартуем из однокубитового оператора
 	{
-		//Пройдёмся по всем однокубитовым элементам
-		for (int i = (me / 2) * 2 + 2; i < g.size; i++)
+		for (char i = (me / 2) * 2 + 2; i < g.edges.size(); i++)//Узел, куда смотрит порт выхода однокубитового оператора
 		{
 			if (!g.busy[i])
 			{
 				g.busy[i] = true;
 				g.edges[me] = i;
-				choose_best_graph(me + 1, g);
+				choose_best_graph(me + 1, g, g_best);
 				g.busy[i] = false;
 			}
 		}
 	}
 	else//В этой точке мы стартуем из порта ввода
 	{
-		if (me < g.size)
+		if (me < g.edges.size())
 			//Порт ввода может смотреть в любой узел графа
-			for (int i = 0; i < g.size; i++)
+			for (int i = 0; i < g.edges.size(); i++)
 			{
 				if (!g.busy[i])
 				{
 					g.busy[i] = true;
 					g.edges[me] = i;
-					choose_best_graph(me + 1, g);
+					choose_best_graph(me + 1, g, g_best);
 					g.busy[i] = false;
 				}
 			}
@@ -357,55 +419,11 @@ graph choose_best_graph(char me, graph g)
 								}//конец равенство действующих элементов между собой
 							}
 
-							//Теперь реализация метода Монте-Карло - необходимо бросить N случайных точек в пространстве g.var[]
-							//И если они с точностью eps удовлетворяют условиям равенства
-							//Реализация метода Монте-Карло - кидаем случайным образом точки и посмотрим что нам подойдёт
+							//В данной точке у нас есть функции для всех условий равенства и полностью собранный граф - осталось только найти глобальный оптимум
+							if (g_best.efficiency < monte_karlo(g, L[3][3], restrictions, 1e-1, 5))
 							{
-								double eps = 1e-1;//Точность для условий равенства
-								bool nonzero = false;//Флаг того, что точка не удовлетворяет одному из условий
-								srand((unsigned)time(0));
-
-								unsigned int satisfy_restrictions = 0;//Число точек, удовлетворяющих всем условиям
-
-								//Начало цикла перебора случайных точек
-								do {
-									//Сгенерируем случайную точку в области допустимых значений
-									for (char i = 0; i < g.var.size(); i++)
-										switch (g.oper_type(i))
-										{
-										case beamsplitter:
-										case directCoupler:
-											g.var[i] = (double)rand() / RAND_MAX; break;
-										case waveplate:
-											g.var[i] = (double)rand() / RAND_MAX * 2 * M_PI; break;
-										}
-
-									//Проверка на условия равенства
-									for (size_t i = 0; i < restrictions.size(); i++)
-										if (abs(restrictions[i]()) > eps)
-										{
-											nonzero = true;
-											break;
-										};
-
-									if (nonzero)//Если хоть одно условие равенства не выполнилось
-									{
-										nonzero = false;
-										continue;//Если данная точка не удовлетворяет одному из условий равенства, то пробуем следующую
-									}
-
-									//В данной точке у нас есть точка, удовлетворяющая всем условиям равенства
-									satisfy_restrictions++;
-
-									//Теперь вычислим то, с какой эффективностью работает схема с получившейся комбинацией внутренних параметров
-									double efficiency = abs(L[3][3]());
-									if (best < efficiency)
-									{
-										best = efficiency;
-										g_best = g;
-									}
-								} while (satisfy_restrictions < 5);//конец цикл перебора точек по числу сгенерированных точек
-							}//Конец реализации метода Монте-Карло
+								g_best = g;
+							}
 						}
 					} while (next_permutation(g.comb.begin(), g.comb.end()));
 
@@ -414,14 +432,31 @@ graph choose_best_graph(char me, graph g)
 			}
 		}
 	}//Конец обработки сгенерированного направленного графа
+}
 
-	return g_best;
+//Функция возвращает заготовки графов, перебирая все комбинации того, куда смотрят первые count-портов ввода
+void make_templates_graphs(char count, graph g, vector<graph> &answer, char deep = 0)
+{
+	if (deep < count)
+	{
+		for (char to = 0; to < g.edges.size(); to++)//Номер узла, куда смотрит порт ввода
+		{
+			if (!g.busy[to])
+			{
+				g.edges[g.q * 2 + deep] = to;
+				g.busy[to] = true;
+				make_templates_graphs(count, g, answer, deep + 1);
+				g.busy[to] = false;
+			}
+		}
+	}
+	else answer.push_back(g);
 }
 
 int main(void)
 {
 	//Кусок кода, созданный для отладки написанного выше кода
-	if (true)
+	if (false)
 	{
 		graph g(6, 5, 0, 0);
 		{
@@ -478,9 +513,10 @@ int main(void)
 		}
 
 		cout << endl << endl;
-		g = choose_best_graph(g.size, g);
+		graph g_best(g);
+		choose_best_graph(g.size, g, g_best);
 		cout << endl << "Variables:" << endl;
-		for (int i = 0; i < g.var.size(); i++) cout << "var[" << i << "]=" << g.var[i] << endl;
+		for (int i = 0; i < g_best.var.size(); i++) cout << "var[" << i << "]=" << g_best.var[i] << endl;
 
 		cout << "\nLogic matrix:";
 		for (char i = 0; i < 4; i++)
@@ -490,6 +526,61 @@ int main(void)
 		}
 		cout << endl;
 	}
+
+	//Основной боевой алгоритм
+	{
+		for (char p = 6; p <= 6; p++)
+			for (char bs = 5; bs <= 5; bs++)
+				for (char dc = 0; dc <= 0; dc++)
+					for (char w = 0; w <= 0; w++)
+					{
+						//Создадим массив заготовок - переберём все варианты куда могут смотреть первые три порта ввода
+						//это 16!/13! = 3360 для p = 6 и q = 5
+						{
+							graph g(p, bs, dc, w);
+							vector<graph> templates_graphs;
+							make_templates_graphs(3, g, templates_graphs);
+							
+							//В данной точке у нас есть куча заготовок графов - необходимо раскидать их по отдельным потокам и как-то собрать с каждого из них инфу
+							int n_threads;//Число отдельных потоков
+							vector<graph> best_graphs(n_threads, g);//Коллекция наилучших графов со всех потоков
+#pragma omp parallel for
+							for (int i = 0; i < templates_graphs.size(); i++)//Итератор на заготовку графа
+							{
+								int my_num_thread;//Номер текущего потока
+								graph loc_template = templates_graphs[i];
+								graph loc_best_graph = best_graphs[my_num_thread];
+								choose_best_graph(0, loc_template, loc_best_graph);
+								best_graphs[my_num_thread] = loc_best_graph;
+#pragma omp master
+								if (i % n_threads == 0 && i != 0)//Каждый раз, когда мы раскидаем на все потоки новые заготовки
+								{
+									//Мы записываем текущий прогресс в текстовый файл
+									ofstream f("current_progress", ios::trunc);
+									f << "Persentage: " << (double)i / templates_graphs.size() * 100 << "%" << endl;
+
+									//Сначала отсортируем графы по убыванию их эффективности
+									vector<graph> sorted_best_graphs(best_graphs);
+									sort(sorted_best_graphs.begin(), sorted_best_graphs.end(),
+										[](graph &left, graph &right)->bool {return left.efficiency > right.efficiency;});
+									for (int i = 0; i < best_graphs.size(); i++)
+									{
+										f << "Graph " << i << endl;
+										f << "\tEfficiency: " << best_graphs[i].efficiency << endl;
+										f << "\tg = {" << best_graphs[i].edges[0];
+										for (char j = 1; j < best_graphs[i].edges.size(); j++) f << ", " << best_graphs[i].edges[j];
+										f << "}" << endl;
+										for (char v = 0; v < best_graphs[i].var.size(); v++)
+											f << "var[" << v << "]=" << best_graphs[i].var[v] << endl;
+									}
+									f.close();
+								}
+#pragma omp master end
+							}
+#pragma omp end
+						}
+					}
+	}//Конец реализации основного боевого алгоритма
 
 	return 0;
 }
