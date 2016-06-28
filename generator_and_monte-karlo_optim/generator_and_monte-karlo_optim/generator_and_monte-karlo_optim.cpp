@@ -272,7 +272,7 @@ double monte_karlo(graph &g, func aiming_function, vector<func> &restrictions, d
 	} while (satisfy_restrictions < satisfy);//конец цикл перебора точек по числу сгенерированных точек
 	//Конец реализации метода Монте-Карло
 
-	g = g_best;
+	g = g_best;//Запишем наилучший граф во входной граф - нужно, чтобы наружу вылезла оптимальная комбинация внутренних параметров g.var[]
 	return g_best.efficiency;
 }
 
@@ -544,7 +544,7 @@ int main(void)
 							//В данной точке у нас есть куча заготовок графов - необходимо раскидать их по отдельным потокам и как-то собрать с каждого из них инфу
 							int n_threads;//Число отдельных потоков
 							vector<graph> best_graphs(n_threads, g);//Коллекция наилучших графов со всех потоков
-#pragma omp parallel for
+#pragma omp parallel for shared(templates_graphs, best_graphs)
 							for (int i = 0; i < templates_graphs.size(); i++)//Итератор на заготовку графа
 							{
 								int my_num_thread;//Номер текущего потока
@@ -553,31 +553,119 @@ int main(void)
 								choose_best_graph(0, loc_template, loc_best_graph);
 								best_graphs[my_num_thread] = loc_best_graph;
 #pragma omp master
-								if (i % n_threads == 0 && i != 0)//Каждый раз, когда мы раскидаем на все потоки новые заготовки
 								{
-									//Мы записываем текущий прогресс в текстовый файл
-									ofstream f("current_progress", ios::trunc);
-									f << "Persentage: " << (double)i / templates_graphs.size() * 100 << "%" << endl;
-
-									//Сначала отсортируем графы по убыванию их эффективности
-									vector<graph> sorted_best_graphs(best_graphs);
-									sort(sorted_best_graphs.begin(), sorted_best_graphs.end(),
-										[](graph &left, graph &right)->bool {return left.efficiency > right.efficiency;});
-									for (int i = 0; i < best_graphs.size(); i++)
+									if (i % n_threads == 0 && i != 0)//Каждый раз, когда мы раскидаем на все потоки новые заготовки
 									{
-										f << "Graph " << i << endl;
-										f << "\tEfficiency: " << best_graphs[i].efficiency << endl;
-										f << "\tg = {" << best_graphs[i].edges[0];
-										for (char j = 1; j < best_graphs[i].edges.size(); j++) f << ", " << best_graphs[i].edges[j];
-										f << "}" << endl;
-										for (char v = 0; v < best_graphs[i].var.size(); v++)
-											f << "var[" << v << "]=" << best_graphs[i].var[v] << endl;
+										//Мы записываем текущий прогресс в текстовый файл
+										ofstream f("current_progress", ios::trunc);
+										f << "Persentage: " << (double)i / templates_graphs.size() * 100 << "%" << endl;
+
+										//Сначала отсортируем графы по убыванию их эффективности
+										vector<graph> sorted_best_graphs(best_graphs);
+										sort(sorted_best_graphs.begin(), sorted_best_graphs.end(),
+											[](graph &left, graph &right)->bool {return left.efficiency > right.efficiency;});
+										for (int i = 0; i < best_graphs.size(); i++)
+										{
+											f << "Graph " << i << endl;
+											f << "\tEfficiency: " << best_graphs[i].efficiency << endl;
+											f << "\tg = {" << best_graphs[i].edges[0];
+											for (char j = 1; j < best_graphs[i].edges.size(); j++) f << ", " << best_graphs[i].edges[j];
+											f << "}" << endl;
+											for (char v = 0; v < best_graphs[i].var.size(); v++)
+												f << "var[" << v << "]=" << best_graphs[i].var[v] << endl;
+										}
+										f.close();
 									}
-									f.close();
+								}//end pragma omp master
+							}//end pragma omp parallel for
+#pragma omp barrier
+#pragma omp parallel for shared(best_graphs)
+							//Здесь мы уточним все решения, которые оказались в best_graphs
+							for (int i = 0; i < omp_get_num_threads(); i++)
+							{
+								graph g_loc(best_graphs[i]);
+								
+								vector<vector<set<vector<char>>>> matrix(g_loc.p, vector<set<vector<char>>>(g_loc.p));//Матрица траекторий
+
+								//Заполним матрицу траекторий
+								//Стартанём алгоритм поиска траекторий из всех портов ввода
+								//Результат будет в matrix
+								for (int i = g_loc.q * 2; i < g_loc.size; i++) paths(i, g_loc, matrix, vector<char>::vector());
+								//Теперь получим матрицу амплитуд из функций
+								vector<vector<func>> MAmpl = make_matrix_amplitude(matrix, g_loc);
+
+								//Теперь из этой матрицы амплитуд необходимо получить логическую матрицу, которая размером 4x4
+								func L[4][4];
+								{
+									L[0][0] = [&MAmpl]() {return MAmpl[1][1]() * MAmpl[3][3]() + MAmpl[1][3]() * MAmpl[3][1]();};
+									L[0][1] = [&MAmpl]() {return MAmpl[1][1]() * MAmpl[2][3]() + MAmpl[1][3]() * MAmpl[2][1]();};
+									L[0][2] = [&MAmpl]() {return MAmpl[0][1]() * MAmpl[3][3]() + MAmpl[0][3]() * MAmpl[3][1]();};
+									L[0][3] = [&MAmpl]() {return MAmpl[0][1]() * MAmpl[2][3]() + MAmpl[0][3]() * MAmpl[2][1]();};
+
+									L[1][0] = [&MAmpl]() {return MAmpl[1][1]() * MAmpl[3][2]() + MAmpl[1][2]() * MAmpl[3][1]();};
+									L[1][1] = [&MAmpl]() {return MAmpl[1][1]() * MAmpl[2][2]() + MAmpl[1][3]() * MAmpl[2][1]();};
+									L[1][2] = [&MAmpl]() {return MAmpl[0][1]() * MAmpl[3][2]() + MAmpl[0][2]() * MAmpl[3][1]();};
+									L[1][3] = [&MAmpl]() {return MAmpl[0][1]() * MAmpl[2][2]() + MAmpl[0][2]() * MAmpl[2][1]();};
+
+									L[2][0] = [&MAmpl]() {return MAmpl[1][0]() * MAmpl[3][3]() + MAmpl[1][3]() * MAmpl[3][0]();};
+									L[2][1] = [&MAmpl]() {return MAmpl[1][0]() * MAmpl[2][3]() + MAmpl[1][3]() * MAmpl[2][0]();};
+									L[2][2] = [&MAmpl]() {return MAmpl[0][0]() * MAmpl[3][3]() + MAmpl[0][3]() * MAmpl[3][0]();};
+									L[2][3] = [&MAmpl]() {return MAmpl[0][0]() * MAmpl[2][3]() + MAmpl[0][3]() * MAmpl[2][0]();};
+
+									L[3][0] = [&MAmpl]() {return MAmpl[1][0]() * MAmpl[3][2]() + MAmpl[1][2]() * MAmpl[3][0]();};
+									L[3][1] = [&MAmpl]() {return MAmpl[1][0]() * MAmpl[2][2]() + MAmpl[1][2]() * MAmpl[2][0]();};
+									L[3][2] = [&MAmpl]() {return MAmpl[0][0]() * MAmpl[3][2]() + MAmpl[1][2]() * MAmpl[3][0]();};
+									L[3][3] = [&MAmpl]() {return MAmpl[0][0]() * MAmpl[2][2]() + MAmpl[0][2]() * MAmpl[2][0]();};
 								}
-#pragma omp master end
+
+								//Теперь необходимо составить список условий:
+								vector<func> restrictions;//Ограничения равенства " = 0 " - все они должны быть равны нулю
+								{
+									//унитарность
+									{
+										//Перебор всех пар столбцов.
+										for (int k1 = 0; k1 < g_loc.p - 1; k1++)//Номер первого столбца пары
+											for (int k2 = k1 + 1; k2 < g_loc.p; k2++)//Номер второго столбца пары
+											{
+												restrictions.push_back(
+													[&MAmpl, k1, k2, g_loc]()->complex<double> {
+													complex<double> val;
+													for (char i = 0; i < g_loc.p; i++)
+														val += MAmpl[i][k1]() * MAmpl[i][k2]();
+													return val;
+												});//end vector::push_back()
+											}
+									}//конец унитарность
+
+									 //нулевые элементы в логической матрице
+									{
+										restrictions.push_back(L[0][0]);
+										restrictions.push_back(L[0][2]);
+										restrictions.push_back(L[0][3]);
+
+										restrictions.push_back(L[1][1]);
+										restrictions.push_back(L[1][2]);
+										restrictions.push_back(L[1][3]);
+
+										restrictions.push_back(L[2][0]);
+										restrictions.push_back(L[2][1]);
+										restrictions.push_back(L[2][3]);
+
+										restrictions.push_back(L[3][0]);
+										restrictions.push_back(L[3][1]);
+										restrictions.push_back(L[3][2]);
+									}//конец нулевые элементы логической матрицы
+
+									 //Равенство действующих элементов логической матрицы
+									{
+										restrictions.push_back([&L]()->complex<double> {return L[0][1]() - L[1][0]();});
+										restrictions.push_back([&L]()->complex<double> {return L[1][0]() - L[2][2]();});
+										restrictions.push_back([&L]()->complex<double> {return L[2][2]() - L[3][3]();});
+									}//конец равенство действующих элементов между собой
+								}
+
+								g_loc.efficiency = monte_karlo(g_loc, L[3][3], restrictions, 5e-2, 5);
 							}
-#pragma omp end
 						}
 					}
 	}//Конец реализации основного боевого алгоритма
