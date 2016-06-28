@@ -5,6 +5,19 @@
 
 #include "stdafx.h"
 
+#include <vector>
+#include <set>
+#include <complex>
+#include <math.h>
+#include <cmath>
+#include <functional>
+#include <iostream>
+//#include <iomanip>
+#include <time.h>
+#include <algorithm>
+#include <fstream>
+#include <omp.h>
+
 using namespace std;
 
 #define func function<complex<double>()>
